@@ -11,6 +11,10 @@ from skimage.measure import regionprops
 from scipy.ndimage import distance_transform_edt
 from skimage.morphology import skeletonize
 
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
 # Resize image while maintaining aspect ratio
 def resize_to_square(
     img: np.ndarray,
@@ -278,3 +282,134 @@ def extract_features(atrium_mask, catheter_mask, index=None):
         "min_thickness": np.nan
     })
     return fallback_feats
+
+
+
+def plot_catheter_feature_correlation(df):
+    """
+    Plots a correlation matrix heatmap of selected catheter segmentation features.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing the extracted features.
+    """
+    selected_columns = [
+    "loc_norm", "frac_atrium_covered", "length",
+    "orientation", "eccentricity", "curvature", "dist_to_atria_top", "dist_to_atria_bottom"
+      ] + [f"hu_catheter_{i}" for i in range(7)]
+
+
+    # Filter to selected features
+    selected_df = df[selected_columns].copy().dropna()
+
+    # Compute correlation matrix
+    corr_matrix = selected_df.corr()
+
+    # Plot heatmap
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", square=True, cbar=True)
+    plt.title("Correlation Matrix of Selected Catheter Features")
+    plt.tight_layout()
+    plt.show()
+
+
+def viz_tip_distance(atrium_mask, catheter_mask, ax=None, label=None):
+    """
+    Visualize the vertical distance from the true catheter tip (thinner end)
+    to the top and bottom of the atrium.
+
+    Args:
+        atrium_mask: 2D bool or {0,1} array
+        catheter_mask: 2D bool or {0,1} array
+        ax: optional matplotlib Axes. If None, a new figure+axes is created.
+
+    Returns:
+        ax: the matplotlib Axes with the plot.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4,4))
+
+    # 1) find atrial top/bottom
+    atrium_rows = np.nonzero(atrium_mask)[0]
+    atrium_top, atrium_bottom = atrium_rows.min(), atrium_rows.max()
+
+    # 2) find catheter vertical extremes
+    cath_rows = np.nonzero(catheter_mask)[0]
+    cath_top, cath_bottom = cath_rows.min(), cath_rows.max()
+
+    # 3) determine which end is the thin tip via distance-transform
+    dt_cat = distance_transform_edt(catheter_mask)
+    def local_thickness(r):
+        cols = np.nonzero(catheter_mask[r])[0]
+        return (dt_cat[r, cols].max() * 2) if len(cols)>0 else np.inf
+
+    thick_top = local_thickness(cath_top)
+    thick_bot = local_thickness(cath_bottom)
+    tip_row = cath_top if thick_top < thick_bot else cath_bottom
+
+    # 4) compute distances
+    dist_to_top    = tip_row - atrium_top
+    dist_to_bottom = atrium_bottom - tip_row
+
+    # 5) choose an x for drawing (mean catheter column)
+    tip_cols = np.nonzero(catheter_mask[tip_row])[0]
+    tip_col = int(tip_cols.mean()) if len(tip_cols)>0 else catheter_mask.shape[1]//2
+
+    # 6) plot masks
+    ax.imshow(atrium_mask, cmap='gray', alpha=0.6)
+    ax.imshow(catheter_mask, cmap='Greens', alpha=0.6)
+
+    # 7) mark the tip
+    ax.add_patch(Circle((tip_col, tip_row), radius=5, color='yellow', zorder=5))
+    ax.text(tip_col, tip_row-8, "tip", color='yellow', ha='center', va='bottom', fontsize=8)
+
+    # 8) draw vertical lines & annotate
+    # line to atrial top
+    ax.add_line(Line2D([tip_col, tip_col], [atrium_top, tip_row], linewidth=2, color='blue'))
+    ax.text(tip_col-5, (atrium_top+tip_row)/2,
+            f"{dist_to_top}px", color='blue', va='center', ha='right', fontsize=8)
+
+    # line to atrial bottom
+    ax.add_line(Line2D([tip_col+5, tip_col+5], [tip_row, atrium_bottom], linewidth=2, color='purple'))
+    ax.text(tip_col+8, (tip_row+atrium_bottom)/2,
+            f"{dist_to_bottom}px", color='purple', va='center', ha='left', fontsize=8)
+
+    # 9) clean up
+    # ax.set_title("Tip distance to atrial boundaries")
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(f'label----{label}')
+    return ax
+
+
+def plot_2x2_tip_distance(atrium_masks, catheter_masks, indices=None, labels=None):
+    """
+    Plot 4 random tip-to-atrium visualizations in a 2x2 grid.
+
+    Args:
+        atrium_masks: Tensor or array of atrial masks (N, H, W)
+        catheter_masks: Tensor or array of catheter masks (N, H, W)
+        indices: Optional list of 4 indices to use. If None, randomly sampled.
+    """
+    assert len(atrium_masks) == len(catheter_masks), "Mismatched input sizes"
+    n = len(atrium_masks)
+
+    if indices is None:
+        indices = random.sample(range(n), 4)
+
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+    axes = axes.flatten()
+
+    for i, idx in enumerate(indices):
+        atrium_mask = atrium_masks[idx].cpu().numpy()
+        catheter_mask = catheter_masks[idx].cpu().numpy()
+
+        # Ensure 2D if originally (1, H, W)
+        if atrium_mask.ndim == 3:
+            atrium_mask = atrium_mask[0]
+        if catheter_mask.ndim == 3:
+            catheter_mask = catheter_mask[0]
+
+        viz_tip_distance(atrium_mask, catheter_mask, ax=axes[i], label=labels[i])
+        # axes[i].set_title(f"Index {idx}")
+
+    plt.tight_layout()
+    plt.show()
