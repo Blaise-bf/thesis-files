@@ -413,3 +413,32 @@ def plot_2x2_tip_distance(atrium_masks, catheter_masks, indices=None, labels=Non
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_catheter_feature_correlation(df):
+    """
+    Plots a correlation matrix heatmap of selected catheter segmentation features.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing the extracted features.
+    """
+    selected_columns = [
+    "loc_norm", "frac_atrium_covered", "length",
+    "orientation", "eccentricity", "curvature", "dist_to_atria_top", "dist_to_atria_bottom"
+      ] + [f"hu_catheter_{i}" for i in range(7)]
+
+
+    # Filter to selected features
+    selected_df = df[selected_columns].copy().dropna()
+
+    # Compute correlation matrix
+    corr_matrix = selected_df.corr()
+
+    # Plot heatmap
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", square=True, cbar=True)
+    plt.title("Correlation Matrix of Selected Catheter Features")
+    plt.tight_layout()
+    plt.show()
+
+
