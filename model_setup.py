@@ -83,7 +83,7 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
     else:  # EfficientNet
         in_features = model.classifier[-1].in_features
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
+            nn.Dropout(p=0.4, inplace=True),
             nn.Linear(in_features, 1)
 
         )
