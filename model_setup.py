@@ -106,13 +106,13 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model.classifier[0],  # Keep LayerNorm2d
             model.classifier[1],  # Keep AdaptiveAvgPool2d
             nn.Flatten(),
-            nn.Dropout(p=0.5, inplace=True),
+            nn.Dropout(p=0.2, inplace=True),
             nn.Linear(in_features, 1)
         )
     else:  # EfficientNet
         in_features = model.classifier[-1].in_features
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.5, inplace=True),
+            nn.Dropout(p=0.2, inplace=True),
             nn.Linear(in_features, 1)
         )
 
