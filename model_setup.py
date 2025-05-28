@@ -15,6 +15,16 @@ from typing import Dict, List, Tuple
 
 
 
+import torch
+import torch.nn as nn
+from torchvision import models
+from torchvision.models import (
+    EfficientNet_B0_Weights,
+    EfficientNet_B7_Weights,
+    ConvNeXt_Tiny_Weights,
+    ConvNeXt_Base_Weights
+)
+
 def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
     """
     Initialize ConvNeXt or EfficientNet using torchvision models.
@@ -22,7 +32,8 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
     Args:
         model_name: One of ['convnext_tiny', 'convnext_base', 'efficientnet_b0', 'efficientnet_b7']
         device: torch.device
-        fine_tune: None (frozen), 'last_two' (last two blocks), or 'all' (entire model)
+        fine_tune: None (frozen), 'head_only' (final conv + classifier), 
+                   'last_two' (last two blocks), or 'all' (entire model)
     """
     # Device setup
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,6 +48,9 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model = models.convnext_base(weights=weights)
         else:
             raise ValueError(f"Unsupported ConvNeXt variant: {model_name}")
+            
+        # For ConvNeXt, identify the final convolutional layer
+        final_conv = model.features[-1].block[-1]
 
     elif model_name.startswith('efficientnet'):
         if model_name == 'efficientnet_b0':
@@ -47,13 +61,27 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model = models.efficientnet_b7(weights=weights)
         else:
             raise ValueError(f"Unsupported EfficientNet variant: {model_name}")
+            
+        # For EfficientNet, identify the final convolutional layer
+        final_conv = model.features[-1]
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
-    # Freezing parameters
+    # Freezing parameters based on fine_tune option
     if fine_tune is None:
+        # Freeze all parameters
         for param in model.parameters():
             param.requires_grad = False
+            
+    elif fine_tune == 'head_only':
+        # Freeze all parameters first
+        for param in model.parameters():
+            param.requires_grad = False
+            
+        # Unfreeze the final convolutional layer
+        for param in final_conv.parameters():
+            param.requires_grad = True
+            
     elif fine_tune == 'last_two':
         # Unfreeze last two blocks
         if model_name.startswith('convnext'):
@@ -64,11 +92,12 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             for layer in model.features[-2:]:
                 for param in layer.parameters():
                     param.requires_grad = True
+                    
     elif fine_tune == 'all':
-        for param in model.parameters():
-            param.requires_grad = True
+        # All parameters remain trainable
+        pass
     else:
-        raise ValueError("fine_tune must be None, 'last_two', or 'all'")
+        raise ValueError("fine_tune must be None, 'head_only', 'last_two', or 'all'")
 
     # Replace classifier head for binary classification
     if model_name.startswith('convnext'):
@@ -77,18 +106,15 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model.classifier[0],  # Keep LayerNorm2d
             model.classifier[1],  # Keep AdaptiveAvgPool2d
             nn.Flatten(),
-            nn.Linear(in_features, 1),
-
+            nn.Dropout(p=0.5, inplace=True),
+            nn.Linear(in_features, 1)
         )
     else:  # EfficientNet
         in_features = model.classifier[-1].in_features
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.4, inplace=True),
+            nn.Dropout(p=0.5, inplace=True),
             nn.Linear(in_features, 1)
-
         )
-
-
 
     return model
 
