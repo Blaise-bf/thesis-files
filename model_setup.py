@@ -211,3 +211,38 @@ def test_step(model: nn.Module,
         for metric in metrics.values():
             metric.reset()
 
+
+def summarize_kfold_metrics(foldperf):
+    """Comprehensive metric summary"""
+    metrics = {
+        'acc': [], 'precision': [], 'recall': [],
+        'auc': [], 'f1': []
+    }
+
+    print("\n=== Comprehensive Fold Performance ===")
+    for fold in sorted(foldperf.keys()):
+        fold_metrics = {
+            'acc': foldperf[fold]['test_acc'][-1],
+            'precision': foldperf[fold]['test_precision'][-1],
+            'recall': foldperf[fold]['test_recall'][-1],
+            'auc': foldperf[fold]['test_auc'][-1],
+            'f1': foldperf[fold]['test_f1'][-1]
+        }
+
+        print(f"\n{fold}:")
+        print(f"Accuracy: {fold_metrics['acc']*100:.2f}%")
+        print(f"Precision: {fold_metrics['precision']:.4f}")
+        print(f"Recall: {fold_metrics['recall']:.4f}")
+        print(f"AUC: {fold_metrics['auc']:.4f}")
+        print(f"F1: {fold_metrics['f1']:.4f}")
+
+        for k in metrics.keys():
+            metrics[k].append(fold_metrics[k])
+
+    print("\n=== Aggregate Metrics ===")
+    for metric, values in metrics.items():
+        unit = '%' if metric == 'acc' else ''
+        print(f"Mean {metric.capitalize()}: {np.mean(values):.4f}{unit} ± {np.std(values):.4f}")
+
+    return metrics
+
