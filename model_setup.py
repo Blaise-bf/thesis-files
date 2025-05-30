@@ -14,25 +14,14 @@ from tqdm.auto import tqdm
 from typing import Dict, List, Tuple
 
 
-
-import torch
-import torch.nn as nn
-from torchvision import models
-from torchvision.models import (
-    EfficientNet_B0_Weights,
-    EfficientNet_B7_Weights,
-    ConvNeXt_Tiny_Weights,
-    ConvNeXt_Base_Weights
-)
-
-def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
+def call_model(model_name='convnext_tiny', device=None, fine_tune=None, drop_out_prob=0.2):
     """
     Initialize ConvNeXt or EfficientNet using torchvision models.
 
     Args:
         model_name: One of ['convnext_tiny', 'convnext_base', 'efficientnet_b0', 'efficientnet_b7']
         device: torch.device
-        fine_tune: None (frozen), 'head_only' (final conv + classifier), 
+        fine_tune: None (frozen), 'head_only' (final conv + classifier),
                    'last_two' (last two blocks), or 'all' (entire model)
     """
     # Device setup
@@ -48,9 +37,9 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model = models.convnext_base(weights=weights)
         else:
             raise ValueError(f"Unsupported ConvNeXt variant: {model_name}")
-            
-        # For ConvNeXt, identify the final convolutional layer
-        final_conv = model.features[-1].block[-1]
+
+        # For ConvNeXt, the final "block" is actually a Sequential of layers
+        final_conv = model.features[-1][-1]  # Get last layer of last block
 
     elif model_name.startswith('efficientnet'):
         if model_name == 'efficientnet_b0':
@@ -61,7 +50,7 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model = models.efficientnet_b7(weights=weights)
         else:
             raise ValueError(f"Unsupported EfficientNet variant: {model_name}")
-            
+
         # For EfficientNet, identify the final convolutional layer
         final_conv = model.features[-1]
     else:
@@ -72,16 +61,16 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
         # Freeze all parameters
         for param in model.parameters():
             param.requires_grad = False
-            
+
     elif fine_tune == 'head_only':
         # Freeze all parameters first
         for param in model.parameters():
             param.requires_grad = False
-            
+
         # Unfreeze the final convolutional layer
         for param in final_conv.parameters():
             param.requires_grad = True
-            
+
     elif fine_tune == 'last_two':
         # Unfreeze last two blocks
         if model_name.startswith('convnext'):
@@ -92,7 +81,7 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             for layer in model.features[-2:]:
                 for param in layer.parameters():
                     param.requires_grad = True
-                    
+
     elif fine_tune == 'all':
         # All parameters remain trainable
         pass
@@ -106,17 +95,17 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None):
             model.classifier[0],  # Keep LayerNorm2d
             model.classifier[1],  # Keep AdaptiveAvgPool2d
             nn.Flatten(),
-            nn.Dropout(p=0.2, inplace=True),
+            nn.Dropout(p=drop_out_prob, inplace=True),
             nn.Linear(in_features, 1)
         )
     else:  # EfficientNet
         in_features = model.classifier[-1].in_features
         model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
+            nn.Dropout(p=drop_out_prob, inplace=True),
             nn.Linear(in_features, 1)
         )
 
-    return model
+    return model.to(device)
 
 
 def train_step(
@@ -169,7 +158,8 @@ def train_step(
 def test_step(model: nn.Module,
               dataloader: torch.utils.data.DataLoader,
               loss_fn: nn.Module,
-              device: torch.device) -> Tuple[float, float, float, float, float, float]:
+              device: torch.device,
+              return_predictions: float = False) -> Tuple[float, float, float, float, float, float]:
     """Test step with proper type handling and metric reset"""
     model.eval()
 
@@ -183,6 +173,8 @@ def test_step(model: nn.Module,
     }
 
     test_loss = 0.0
+    all_probs = []
+    all_labels = []
 
     try:
         with torch.no_grad():
@@ -201,6 +193,8 @@ def test_step(model: nn.Module,
                 # Get probabilities and ensure proper shapes
                 probs = torch.sigmoid(outputs)
                 preds = (probs > 0.5).float()
+                all_probs.append(probs.cpu())
+                all_labels.append(labels.cpu())
 
                 # Reshape if needed
                 if len(labels.shape) == 1:
@@ -223,13 +217,18 @@ def test_step(model: nn.Module,
             'f1': float(metrics['f1'].compute().item())
         }
 
+        # Concatenate all predictions
+        preds_retrun = torch.cat(all_probs).numpy(), torch.cat(all_labels).numpy()
+
+
         return (
             results['loss'],
             results['acc'],
             results['precision'],
             results['recall'],
             results['auc'],
-            results['f1']
+            results['f1'],
+            preds_retrun
         )
 
     finally:
@@ -274,7 +273,6 @@ def summarize_kfold_metrics(foldperf):
 
 
 
-
 def train_kfold_model(catheter_predictions,
                      atria_predictions,
                      labels,
@@ -282,9 +280,9 @@ def train_kfold_model(catheter_predictions,
                      original_images=None,
                      size=600,
                      model_name='efficientnet_b7',
-                     num_epochs=60, 
+                     num_epochs=60,
                      batch_size=8,
-                     k=5, 
+                     k=5,
                      fine_tune='last_two'):
     """Stratified K-fold training with tqdm progress bars"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -296,31 +294,34 @@ def train_kfold_model(catheter_predictions,
         A.Resize(IMG_SIZE, IMG_SIZE, interpolation=cv2.INTER_NEAREST),
         A.HorizontalFlip(p=0.3),
         A.Rotate(limit=15, p=0.2, border_mode=cv2.BORDER_CONSTANT),
-        A.OneOf([
-            A.ElasticTransform(alpha=30, sigma=5, p=0.3),
-            A.GridDistortion(num_steps=5, distort_limit=0.15, 
-                           interpolation=cv2.INTER_NEAREST,
-                           border_mode=cv2.BORDER_CONSTANT, p=0.3)
-        ], p=0.3),
+        A.GridElasticDeform(
+       num_grid_xy=(7, 7),
+           magnitude=3,
+         interpolation=cv2.INTER_NEAREST,
+                mask_interpolation=cv2.INTER_NEAREST,
+           p=0.2
+       )  ,
         A.ToTensorV2()
     ])
+
 
     val_transform = A.Compose([
         A.Resize(IMG_SIZE, IMG_SIZE, interpolation=cv2.INTER_NEAREST),
         A.ToTensorV2()
     ])
-  
+
     # Use StratifiedKFold instead of KFold
     splits = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
     foldperf = {}
+    fold_predictions = {}  # Store predictions for each fold
 
     # Convert labels to numpy array for stratified splitting
     labels_np = np.array(labels)
-    
+
     # StratifiedKFold.split needs both features (X) and labels (y)
     # We'll use indices as dummy features since we have separate components
     dummy_X = np.arange(len(labels_np))
-    
+
     for fold, (train_idx, val_idx) in enumerate(splits.split(dummy_X, labels_np)):
         print(f'\n=== Fold {fold + 1}/{k} ===')
         print(f"Train class distribution: {np.bincount(labels_np[train_idx])}")
@@ -348,7 +349,7 @@ def train_kfold_model(catheter_predictions,
             original_images=train_originals,
             transform=train_transform
         )
-        
+
         val_dataset = ClassificationDataset(
             catheter_predictions=val_catheter,
             atria_predictions=val_atria,
@@ -360,9 +361,9 @@ def train_kfold_model(catheter_predictions,
 
         # Create dataloaders with stratified batches
         effective_batch = batch_size * max(1, num_gpus)
-        
+
         # For training, we can use StratifiedSampler if needed (optional)
-        train_loader = DataLoader(train_dataset, batch_size=effective_batch, 
+        train_loader = DataLoader(train_dataset, batch_size=effective_batch,
                                 shuffle=True, pin_memory=True, num_workers=2)
         test_loader = DataLoader(val_dataset, batch_size=effective_batch,
                                shuffle=False, pin_memory=True, num_workers=2)
@@ -374,15 +375,15 @@ def train_kfold_model(catheter_predictions,
         model = model.to(device)
 
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), 
+        optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                         lr=0.0001, weight_decay=0.001)
 
         # LR scheduling
-        warmup_scheduler = LinearLR(optimizer, start_factor=0.01, 
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.01,
                                   end_factor=1.0, total_iters=5)
-        cosine_scheduler = CosineAnnealingLR(optimizer, 
+        cosine_scheduler = CosineAnnealingLR(optimizer,
                                            T_max=num_epochs-5, eta_min=1e-6)
-        scheduler = SequentialLR(optimizer, 
+        scheduler = SequentialLR(optimizer,
                                schedulers=[warmup_scheduler, cosine_scheduler],
                                milestones=[5])
 
@@ -392,6 +393,9 @@ def train_kfold_model(catheter_predictions,
             'test_precision': [], 'test_recall': [],
             'test_auc': [], 'test_f1': []
         }
+        # For storing final fold predictions
+        fold_probs = None
+        fold_labels = None
 
         for epoch in tqdm(range(num_epochs), desc=f'Epochs'):
             free_gpu_memory()
@@ -400,10 +404,26 @@ def train_kfold_model(catheter_predictions,
             train_loss, train_acc = train_step(
                 model, train_loader, criterion, optimizer, scheduler, device)
 
-            # Validation with all metrics
+            # Validation - get predictions only on last epoch
+            return_preds = (epoch == num_epochs - 1)
+            test_metrics = test_step(
+                model, test_loader, criterion, device, return_predictions=return_preds)
+
             (test_loss, test_acc, test_precision,
-             test_recall, test_auc, test_f1) = test_step(
-                model, test_loader, criterion, device)
+             test_recall, test_auc, test_f1, preds) = test_metrics
+
+            # Store predictions if available
+            if return_preds and preds is not None:
+                fold_probs, fold_labels = preds
+
+            # # Training
+            # train_loss, train_acc = train_step(
+            #     model, train_loader, criterion, optimizer, scheduler, device)
+
+            # # Validation with all metrics
+            # (test_loss, test_acc, test_precision,
+            #  test_recall, test_auc, test_f1) = test_step(
+            #     model, test_loader, criterion, device)
 
             # Store results
             history['train_loss'].append(train_loss)
@@ -429,6 +449,6 @@ def train_kfold_model(catheter_predictions,
                       f"F1: {test_f1:.4f}")
 
         foldperf[f'fold{fold+1}'] = history
+        fold_predictions[f'fold{fold+1}'] = (fold_probs, fold_labels)
 
-    return foldperf
-
+    return foldperf, fold_predictions
