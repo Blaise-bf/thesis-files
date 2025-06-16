@@ -83,6 +83,18 @@ def call_model(model_name='convnext_tiny', device=None, fine_tune=None, drop_out
                 for param in layer.parameters():
                     param.requires_grad = True
 
+    
+    elif fine_tune == 'last_three':
+        # Unfreeze last three blocks
+        if model_name.startswith('convnext'):
+            for block in model.features[-3:]:
+                for param in block.parameters():
+                    param.requires_grad = True
+        else:  # EfficientNet
+            for layer in model.features[-3:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
     elif fine_tune == 'all':
         # All parameters remain trainable
         pass
